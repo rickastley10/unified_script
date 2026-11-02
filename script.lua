@@ -37,7 +37,7 @@ local State = {
     Speed      = false,
     SpeedRate  = 60,
     ESP        = false,
-    Fling      = false,   -- NEW
+    Fling      = false,
 }
 
 -- Runtime refs
@@ -45,7 +45,7 @@ local FlyConn, FlyVel, FlyGyro
 local NoclipConn
 local ToolConn
 local SpinConn, SpeedConn
-local FlingConn, FlingDied, FlingAngular   -- NEW
+local FlingConn, FlingDied, FlingAngular
 
 --============================================================
 -- UI BUILD
@@ -453,28 +453,32 @@ end
 createToggle("ESP", State.ESP, setESP)
 
 --============================================================
--- 7) FLING  (BodyAngularVelocity touch-fling)
---    Any part that touches you gets launched. Toggle-style.
---    Uses the same physics trick as IY's ;fling (density 100, massless,
---    high angular velocity cycling). Client-side only.
+-- 7) FLING  (BodyAngularVelocity touch-fling, self-safe)
+--    Any part that touches you gets launched.
+--    Your own parts are kept noclipped + massless so the spin
+--    doesn't launch YOU. Restores properties cleanly on toggle-off.
 --============================================================
+local FlingSavedProps = {}   -- part -> saved physical props / massless
+
+local function restoreFlingProps()
+    for part, saved in pairs(FlingSavedProps) do
+        if typeof(part) == "Instance" and part.Parent and part:IsA("BasePart") then
+            part.CustomPhysicalProperties = saved.Props
+            part.Massless = saved.Massless
+        end
+    end
+    FlingSavedProps = {}
+end
+
 local function stopFling()
     State.Fling = false
     if FlingConn then FlingConn:Disconnect(); FlingConn = nil end
     if FlingDied then FlingDied:Disconnect(); FlingDied = nil end
     if FlingAngular then FlingAngular:Destroy(); FlingAngular = nil end
 
-    local char = LocalPlayer.Character
-    if char then
-        local root = char:FindFirstChild("HumanoidRootPart")
-        if root then
-            for _, v in ipairs(root:GetChildren()) do
-                if v:IsA("BodyAngularVelocity") and v.Name == "ModFling" then
-                    v:Destroy()
-                end
-            end
-        end
-    end
+    restoreFlingProps()
+
+    -- Do NOT call stopNoclip here — user may have Noclip toggled independently.
 end
 
 local function startFling()
@@ -487,15 +491,22 @@ local function startFling()
     stopFling()
     State.Fling = true
 
-    -- Heavier physical properties so contacts fling harder
+    -- 1) Save current physical props / massless, then set heavy + massless.
+    FlingSavedProps = {}
     for _, part in ipairs(char:GetDescendants()) do
         if part:IsA("BasePart") then
+            FlingSavedProps[part] = {
+                Props    = part.CustomPhysicalProperties,
+                Massless = part.Massless,
+            }
             part.CustomPhysicalProperties = PhysicalProperties.new(100, 0.3, 0.5)
             part.Massless = true
             part.Velocity = Vector3.zero
+            part.RotVelocity = Vector3.zero
         end
     end
 
+    -- 2) Spin only the root, not every part.
     FlingAngular = Instance.new("BodyAngularVelocity")
     FlingAngular.Name = "ModFling"
     FlingAngular.Parent = root
@@ -503,12 +514,42 @@ local function startFling()
     FlingAngular.MaxTorque = Vector3.new(0, math.huge, 0)
     FlingAngular.P = math.huge
 
-    FlingConn = RunService.Heartbeat:Connect(function()
-        if not State.Fling or not FlingAngular or not FlingAngular.Parent then return end
-        FlingAngular.AngularVelocity = Vector3.new(0, 99999, 0)
-        task.wait(0.2)
-        FlingAngular.AngularVelocity = Vector3.new(0, 0, 0)
-        task.wait(0.1)
+    -- 3) Force noclip on your own character every frame so the spin
+    --    cannot launch you. This is the piece that stops self-fling.
+    FlingConn = RunService.Stepped:Connect(function()
+        if not State.Fling then return end
+        local ch = LocalPlayer.Character
+        if not ch then return end
+
+        for _, part in ipairs(ch:GetDescendants()) do
+            if part:IsA("BasePart") then
+                if part.CanCollide then
+                    part.CanCollide = false
+                end
+                -- keep heavy/massless fresh in case something resets it
+                if part.CustomPhysicalProperties ~= PhysicalProperties.new(100, 0.3, 0.5) then
+                    part.CustomPhysicalProperties = PhysicalProperties.new(100, 0.3, 0.5)
+                end
+                if not part.Massless then
+                    part.Massless = true
+                end
+            end
+        end
+    end)
+
+    -- Separate short loop for the spin on/off cycling, kept apart from the
+    -- noclipping loop so they don't fight for task.wait slots.
+    task.spawn(function()
+        while State.Fling do
+            if FlingAngular and FlingAngular.Parent then
+                FlingAngular.AngularVelocity = Vector3.new(0, 99999, 0)
+            end
+            task.wait(0.2)
+            if FlingAngular and FlingAngular.Parent then
+                FlingAngular.AngularVelocity = Vector3.new(0, 0, 0)
+            end
+            task.wait(0.1)
+        end
     end)
 
     FlingDied = hum.Died:Connect(stopFling)
@@ -782,7 +823,7 @@ end)
 LocalPlayer.CharacterAdded:Connect(function()
     if State.Fly then stopFly() end
     if State.Noclip then stopNoclip() end
-    if State.Fling then stopFling() end   -- NEW
+    if State.Fling then stopFling() end
 end)
 
 print("[UnifiedModMenu] Loaded successfully.")
