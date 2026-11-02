@@ -1,6 +1,6 @@
 --[[
     DELTA EXECUTOR — UNIFIED MOD MENU
-    Features: Click TP, Fly (Collide), Noclip, Spin, Speed, ESP, Position Changer, TP to Player
+    Features: Click TP, Fly (Collide), Noclip, Spin, Speed, ESP, Fling, Position Changer, TP to Player
 ]]
 
 --============================================================
@@ -37,6 +37,7 @@ local State = {
     Speed      = false,
     SpeedRate  = 60,
     ESP        = false,
+    Fling      = false,   -- NEW
 }
 
 -- Runtime refs
@@ -44,6 +45,7 @@ local FlyConn, FlyVel, FlyGyro
 local NoclipConn
 local ToolConn
 local SpinConn, SpeedConn
+local FlingConn, FlingDied, FlingAngular   -- NEW
 
 --============================================================
 -- UI BUILD
@@ -451,7 +453,79 @@ end
 createToggle("ESP", State.ESP, setESP)
 
 --============================================================
--- 7) POSITION CHANGER
+-- 7) FLING  (BodyAngularVelocity touch-fling)
+--    Any part that touches you gets launched. Toggle-style.
+--    Uses the same physics trick as IY's ;fling (density 100, massless,
+--    high angular velocity cycling). Client-side only.
+--============================================================
+local function stopFling()
+    State.Fling = false
+    if FlingConn then FlingConn:Disconnect(); FlingConn = nil end
+    if FlingDied then FlingDied:Disconnect(); FlingDied = nil end
+    if FlingAngular then FlingAngular:Destroy(); FlingAngular = nil end
+
+    local char = LocalPlayer.Character
+    if char then
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if root then
+            for _, v in ipairs(root:GetChildren()) do
+                if v:IsA("BodyAngularVelocity") and v.Name == "ModFling" then
+                    v:Destroy()
+                end
+            end
+        end
+    end
+end
+
+local function startFling()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local hum  = char:FindFirstChildOfClass("Humanoid")
+    if not root or not hum then return end
+
+    stopFling()
+    State.Fling = true
+
+    -- Heavier physical properties so contacts fling harder
+    for _, part in ipairs(char:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.CustomPhysicalProperties = PhysicalProperties.new(100, 0.3, 0.5)
+            part.Massless = true
+            part.Velocity = Vector3.zero
+        end
+    end
+
+    FlingAngular = Instance.new("BodyAngularVelocity")
+    FlingAngular.Name = "ModFling"
+    FlingAngular.Parent = root
+    FlingAngular.AngularVelocity = Vector3.new(0, 0, 0)
+    FlingAngular.MaxTorque = Vector3.new(0, math.huge, 0)
+    FlingAngular.P = math.huge
+
+    FlingConn = RunService.Heartbeat:Connect(function()
+        if not State.Fling or not FlingAngular or not FlingAngular.Parent then return end
+        FlingAngular.AngularVelocity = Vector3.new(0, 99999, 0)
+        task.wait(0.2)
+        FlingAngular.AngularVelocity = Vector3.new(0, 0, 0)
+        task.wait(0.1)
+    end)
+
+    FlingDied = hum.Died:Connect(stopFling)
+end
+
+local function setFling(enabled)
+    if enabled then
+        startFling()
+    else
+        stopFling()
+    end
+end
+
+createToggle("Fling", State.Fling, setFling)
+
+--============================================================
+-- 8) POSITION CHANGER
 --============================================================
 local PosRow = Instance.new("Frame")
 PosRow.Size = UDim2.new(1, -8, 0, 132)
@@ -591,7 +665,7 @@ TeleportBtn.MouseButton1Click:Connect(function()
 end)
 
 --============================================================
--- 8) TP TO PLAYER
+-- 9) TP TO PLAYER
 --============================================================
 local TPPlayerRow = Instance.new("Frame")
 TPPlayerRow.Size = UDim2.new(1, -8, 0, 150)
@@ -708,6 +782,7 @@ end)
 LocalPlayer.CharacterAdded:Connect(function()
     if State.Fly then stopFly() end
     if State.Noclip then stopNoclip() end
+    if State.Fling then stopFling() end   -- NEW
 end)
 
 print("[UnifiedModMenu] Loaded successfully.")
