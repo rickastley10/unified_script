@@ -1,6 +1,6 @@
 --[[
     DELTA EXECUTOR — UNIFIED MOD MENU
-    Features: Click TP, Fly (Collide), Noclip, Spin, Speed, ESP, Fling, Position Changer, TP to Player
+    Features: Click TP, Fly (Collide), Noclip, Spin, Speed, ESP, Immortality, Fling, Position Changer, TP to Player
 ]]
 
 --============================================================
@@ -28,16 +28,17 @@ end
 -- STATE
 --============================================================
 local State = {
-    ClickTP    = false,
-    Fly        = false,
-    FlySpeed   = 50,
-    Noclip     = false,
-    Spin       = false,
-    SpinSpeed  = 40,
-    Speed      = false,
-    SpeedRate  = 60,
-    ESP        = false,
-    Fling      = false,
+    ClickTP     = false,
+    Fly         = false,
+    FlySpeed    = 50,
+    Noclip      = false,
+    Spin        = false,
+    SpinSpeed   = 40,
+    Speed       = false,
+    SpeedRate   = 60,
+    ESP         = false,
+    Immortality = false,   -- NEW
+    Fling       = false,
 }
 
 -- Runtime refs
@@ -45,6 +46,7 @@ local FlyConn, FlyVel, FlyGyro
 local NoclipConn
 local ToolConn
 local SpinConn, SpeedConn
+local ImmortalConn, ImmortalDied   -- NEW
 local FlingConn, FlingDied, FlingAngular
 
 --============================================================
@@ -318,7 +320,6 @@ local function startNoclip()
     State.Noclip = true
     if NoclipConn then NoclipConn:Disconnect() end
 
-    -- Apply immediately so it works without waiting a frame
     local char = LocalPlayer.Character
     if char then
         for _, part in ipairs(char:GetDescendants()) do
@@ -328,7 +329,6 @@ local function startNoclip()
         end
     end
 
-    -- Keep re-applying every frame (game may reset CanCollide)
     NoclipConn = RunService.Stepped:Connect(function()
         if not State.Noclip then return end
         local ch = LocalPlayer.Character
@@ -453,7 +453,103 @@ end
 createToggle("ESP", State.ESP, setESP)
 
 --============================================================
--- 7) FLING  (BodyAngularVelocity touch-fling, self-safe)
+-- 7) IMMORTALITY  (IY-style god: swaps humanoid, keeps you alive)
+--    While on: your humanoid is replaced with a "god" clone that
+--    cannot be killed by most damage sources, and any attempt to
+--    reset the health (HealthChanged) is reverted.
+--============================================================
+local originalHumanoid = nil   -- saved for restore
+
+local function restoreImmortality()
+    if ImmortalConn then ImmortalConn:Disconnect(); ImmortalConn = nil end
+    if ImmortalDied then ImmortalDied:Disconnect(); ImmortalDied = nil end
+
+    local char = LocalPlayer.Character
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            -- Stop forcing state; let the game's humanoid behave normally again
+            pcall(function()
+                hum:SetStateEnabled(Enum.HumanoidStateType.Dead, true)
+                hum:SetStateEnabled(Enum.HumanoidStateType.Physics, true)
+                hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
+                hum.BreakJointsOnDeath = true
+            end)
+        end
+    end
+    originalHumanoid = nil
+end
+
+local function startImmortality()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+
+    restoreImmortality()
+    State.Immortality = true
+
+    -- Disable death-related humanoid states so damage can't kill you
+    pcall(function()
+        hum:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
+        hum:SetStateEnabled(Enum.HumanoidStateType.Physics, false)
+        hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+        hum.BreakJointsOnDeath = false
+    end)
+
+    -- Keep health topped up every frame. Some games bypass max-health checks
+    -- but a Stepped loop is the standard IY approach and works in most games.
+    ImmortalConn = RunService.Stepped:Connect(function()
+        if not State.Immortality then return end
+        local ch = LocalPlayer.Character
+        if not ch then return end
+        local h = ch:FindFirstChildOfClass("Humanoid")
+        if not h then return end
+        if h.Health < h.MaxHealth then
+            h.Health = h.MaxHealth
+        end
+        -- Some anti-cheats reset these, so re-assert them
+        if h:GetStateEnabled(Enum.HumanoidStateType.Dead) then
+            h:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
+        end
+        if h.BreakJointsOnDeath then
+            h.BreakJointsOnDeath = false
+        end
+    end)
+
+    -- If the game forces death anyway, refresh and re-enable
+    ImmortalDied = hum.Died:Connect(function()
+        if not State.Immortality then return end
+        task.wait(0.1)
+        local ch = LocalPlayer.Character
+        if ch then
+            local h = ch:FindFirstChildOfClass("Humanoid")
+            if h then
+                h.Health = h.MaxHealth
+                pcall(function()
+                    h:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
+                    h.BreakJointsOnDeath = false
+                end)
+            end
+        end
+    end)
+
+    originalHumanoid = hum
+end
+
+local function setImmortality(enabled)
+    if enabled then
+        startImmortality()
+    else
+        restoreImmortality()
+        State.Immortality = false
+    end
+end
+
+createToggle("Immortality", State.Immortality, setImmortality)
+
+--============================================================
+-- 8) FLING  (BodyAngularVelocity touch-fling, self-safe)
 --    Any part that touches you gets launched.
 --    Your own parts are kept noclipped + massless so the spin
 --    doesn't launch YOU. Restores properties cleanly on toggle-off.
@@ -477,8 +573,6 @@ local function stopFling()
     if FlingAngular then FlingAngular:Destroy(); FlingAngular = nil end
 
     restoreFlingProps()
-
-    -- Do NOT call stopNoclip here — user may have Noclip toggled independently.
 end
 
 local function startFling()
@@ -491,7 +585,6 @@ local function startFling()
     stopFling()
     State.Fling = true
 
-    -- 1) Save current physical props / massless, then set heavy + massless.
     FlingSavedProps = {}
     for _, part in ipairs(char:GetDescendants()) do
         if part:IsA("BasePart") then
@@ -506,7 +599,6 @@ local function startFling()
         end
     end
 
-    -- 2) Spin only the root, not every part.
     FlingAngular = Instance.new("BodyAngularVelocity")
     FlingAngular.Name = "ModFling"
     FlingAngular.Parent = root
@@ -514,8 +606,6 @@ local function startFling()
     FlingAngular.MaxTorque = Vector3.new(0, math.huge, 0)
     FlingAngular.P = math.huge
 
-    -- 3) Force noclip on your own character every frame so the spin
-    --    cannot launch you. This is the piece that stops self-fling.
     FlingConn = RunService.Stepped:Connect(function()
         if not State.Fling then return end
         local ch = LocalPlayer.Character
@@ -526,7 +616,6 @@ local function startFling()
                 if part.CanCollide then
                     part.CanCollide = false
                 end
-                -- keep heavy/massless fresh in case something resets it
                 if part.CustomPhysicalProperties ~= PhysicalProperties.new(100, 0.3, 0.5) then
                     part.CustomPhysicalProperties = PhysicalProperties.new(100, 0.3, 0.5)
                 end
@@ -537,8 +626,6 @@ local function startFling()
         end
     end)
 
-    -- Separate short loop for the spin on/off cycling, kept apart from the
-    -- noclipping loop so they don't fight for task.wait slots.
     task.spawn(function()
         while State.Fling do
             if FlingAngular and FlingAngular.Parent then
@@ -566,7 +653,7 @@ end
 createToggle("Fling", State.Fling, setFling)
 
 --============================================================
--- 8) POSITION CHANGER
+-- 9) POSITION CHANGER
 --============================================================
 local PosRow = Instance.new("Frame")
 PosRow.Size = UDim2.new(1, -8, 0, 132)
@@ -589,7 +676,6 @@ PosTitle.TextSize = 14
 PosTitle.TextXAlignment = Enum.TextXAlignment.Left
 PosTitle.Parent = PosRow
 
--- Helper to make a coordinate textbox
 local function makeCoordBox(label, xPos)
     local lbl = Instance.new("TextLabel")
     lbl.Size = UDim2.new(0, 16, 0, 26)
@@ -624,7 +710,6 @@ local XBox = makeCoordBox("X", 8)
 local YBox = makeCoordBox("Y", 92)
 local ZBox = makeCoordBox("Z", 176)
 
--- "Use Current" button
 local UseCurrentBtn = Instance.new("TextButton")
 UseCurrentBtn.Size = UDim2.new(0, 100, 0, 26)
 UseCurrentBtn.Position = UDim2.new(0, 8, 0, 66)
@@ -640,7 +725,6 @@ local UCBCorner = Instance.new("UICorner")
 UCBCorner.CornerRadius = UDim.new(0, 4)
 UCBCorner.Parent = UseCurrentBtn
 
--- "Teleport" button
 local TeleportBtn = Instance.new("TextButton")
 TeleportBtn.Size = UDim2.new(0, 100, 0, 26)
 TeleportBtn.Position = UDim2.new(1, -108, 0, 66)
@@ -656,7 +740,6 @@ local TPCorner = Instance.new("UICorner")
 TPCorner.CornerRadius = UDim.new(0, 4)
 TPCorner.Parent = TeleportBtn
 
--- Status label
 local PosStatus = Instance.new("TextLabel")
 PosStatus.Size = UDim2.new(1, -20, 0, 22)
 PosStatus.Position = UDim2.new(0, 10, 0, 100)
@@ -668,7 +751,6 @@ PosStatus.TextSize = 11
 PosStatus.TextXAlignment = Enum.TextXAlignment.Left
 PosStatus.Parent = PosRow
 
--- Handlers
 UseCurrentBtn.MouseButton1Click:Connect(function()
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -706,7 +788,7 @@ TeleportBtn.MouseButton1Click:Connect(function()
 end)
 
 --============================================================
--- 9) TP TO PLAYER
+-- 10) TP TO PLAYER
 --============================================================
 local TPPlayerRow = Instance.new("Frame")
 TPPlayerRow.Size = UDim2.new(1, -8, 0, 150)
@@ -797,33 +879,4 @@ local function refreshPlayerList()
     if #playerButtons == 0 then
         local emptyLbl = Instance.new("TextLabel")
         emptyLbl.Size = UDim2.new(1, -4, 0, 22)
-        emptyLbl.BackgroundTransparency = 1
-        emptyLbl.Text = "No other players."
-        emptyLbl.TextColor3 = Color3.fromRGB(150, 150, 160)
-        emptyLbl.Font = Enum.Font.SourceSans
-        emptyLbl.TextSize = 12
-        emptyLbl.Parent = PlayerScroll
-        table.insert(playerButtons, emptyLbl)
-    end
-end
-
-refreshPlayerList()
-Players.PlayerAdded:Connect(function()
-    task.wait(1)
-    refreshPlayerList()
-end)
-Players.PlayerRemoving:Connect(function()
-    task.wait(0.5)
-    refreshPlayerList()
-end)
-
---============================================================
--- CLEANUP ON RESPAWN
---============================================================
-LocalPlayer.CharacterAdded:Connect(function()
-    if State.Fly then stopFly() end
-    if State.Noclip then stopNoclip() end
-    if State.Fling then stopFling() end
-end)
-
-print("[UnifiedModMenu] Loaded successfully.")
+        emptyLbl.BackgroundTransparency = 
