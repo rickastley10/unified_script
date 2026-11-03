@@ -879,4 +879,38 @@ local function refreshPlayerList()
     if #playerButtons == 0 then
         local emptyLbl = Instance.new("TextLabel")
         emptyLbl.Size = UDim2.new(1, -4, 0, 22)
-        emptyLbl.BackgroundTransparency = 
+        emptyLbl.BackgroundTransparency = 1
+        emptyLbl.Text = "No other players."
+        emptyLbl.TextColor3 = Color3.fromRGB(150, 150, 160)
+        emptyLbl.Font = Enum.Font.SourceSans
+        emptyLbl.TextSize = 12
+        emptyLbl.Parent = PlayerScroll
+        table.insert(playerButtons, emptyLbl)
+    end
+end
+
+refreshPlayerList()
+Players.PlayerAdded:Connect(function()
+    task.wait(1)
+    refreshPlayerList()
+end)
+Players.PlayerRemoving:Connect(function()
+    task.wait(0.5)
+    refreshPlayerList()
+end)
+
+--============================================================
+-- CLEANUP ON RESPAWN
+--============================================================
+LocalPlayer.CharacterAdded:Connect(function()
+    if State.Fly then stopFly() end
+    if State.Noclip then stopNoclip() end
+    if State.Immortality then
+        -- Character respawned; restart immortality on the new humanoid
+        task.wait(0.5)
+        if State.Immortality then startImmortality() end
+    end
+    if State.Fling then stopFling() end
+end)
+
+print("[UnifiedModMenu] Loaded successfully.")
