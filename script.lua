@@ -37,7 +37,7 @@ local State = {
     Speed       = false,
     SpeedRate   = 60,
     ESP         = false,
-    Immortality = false,   -- NEW
+    Immortality = false,
     Fling       = false,
 }
 
@@ -46,7 +46,7 @@ local FlyConn, FlyVel, FlyGyro
 local NoclipConn
 local ToolConn
 local SpinConn, SpeedConn
-local ImmortalConn, ImmortalDied   -- NEW
+local ImmortalConn, ImmortalDied
 local FlingConn, FlingDied, FlingAngular
 
 --============================================================
@@ -296,8 +296,6 @@ end
 
 --============================================================
 -- 3) NOCLIP  (Infinite Yield style)
---    Continuously sets CanCollide = false on all character parts.
---    You keep normal walking/movement — you just walk through walls.
 --============================================================
 local function restoreCollisions()
     local char = LocalPlayer.Character
@@ -453,22 +451,25 @@ end
 createToggle("ESP", State.ESP, setESP)
 
 --============================================================
--- 7) IMMORTALITY  (IY-style god: swaps humanoid, keeps you alive)
---    While on: your humanoid is replaced with a "god" clone that
---    cannot be killed by most damage sources, and any attempt to
---    reset the health (HealthChanged) is reverted.
+-- 7) IMMORTALITY  (Infinite Yield ;god style)
+--    Swaps your Humanoid for a clone with death states disabled.
+--    This is the same trick IY uses for ;god.
 --============================================================
-local originalHumanoid = nil   -- saved for restore
+local immortalGodHumanoid = nil   -- reference to the cloned "god" humanoid
 
-local function restoreImmortality()
+local function stopImmortality()
+    State.Immortality = false
+
     if ImmortalConn then ImmortalConn:Disconnect(); ImmortalConn = nil end
     if ImmortalDied then ImmortalDied:Disconnect(); ImmortalDied = nil end
 
+    -- We cannot cleanly undo the humanoid swap. On next respawn the game
+    -- gives a normal humanoid, so this just stops the health-refresh loop
+    -- and re-enables the death states on whatever humanoid is current.
     local char = LocalPlayer.Character
     if char then
         local hum = char:FindFirstChildOfClass("Humanoid")
         if hum then
-            -- Stop forcing state; let the game's humanoid behave normally again
             pcall(function()
                 hum:SetStateEnabled(Enum.HumanoidStateType.Dead, true)
                 hum:SetStateEnabled(Enum.HumanoidStateType.Physics, true)
@@ -477,28 +478,54 @@ local function restoreImmortality()
             end)
         end
     end
-    originalHumanoid = nil
+
+    immortalGodHumanoid = nil
 end
 
 local function startImmortality()
     local char = LocalPlayer.Character
     if not char then return end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hum then return end
+    local human = char:FindFirstChildOfClass("Humanoid")
+    if not human then return end
 
-    restoreImmortality()
     State.Immortality = true
 
-    -- Disable death-related humanoid states so damage can't kill you
-    pcall(function()
-        hum:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
-        hum:SetStateEnabled(Enum.HumanoidStateType.Physics, false)
-        hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-        hum.BreakJointsOnDeath = false
-    end)
+    -- IY's god method: clone the humanoid, detach the character, kill original
+    local Cam = Workspace.CurrentCamera
+    local Pos = Cam.CFrame
 
-    -- Keep health topped up every frame. Some games bypass max-health checks
-    -- but a Stepped loop is the standard IY approach and works in most games.
+    local nHuman = human:Clone()
+    nHuman.Parent = char
+    LocalPlayer.Character = nil
+
+    -- Disable death-related states on the clone
+    nHuman:SetStateEnabled(15, false) -- Dead
+    nHuman:SetStateEnabled(1, false)  -- Physics
+    nHuman:SetStateEnabled(0, false)  -- FallingDown
+    nHuman.BreakJointsOnDeath = true
+
+    human:Destroy()
+
+    -- Restore character reference and point camera at the new humanoid
+    LocalPlayer.Character = char
+    Cam.CameraSubject = nHuman
+    Cam.CFrame = Pos
+
+    nHuman.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+
+    -- Reload animations so the character doesn't look frozen
+    local animateScript = char:FindFirstChild("Animate")
+    if animateScript then
+        animateScript.Disabled = true
+        task.wait()
+        animateScript.Disabled = false
+    end
+
+    nHuman.Health = nHuman.MaxHealth
+    immortalGodHumanoid = nHuman
+
+    -- Health-refresh loop as a safety net (in case the game bypasses
+    -- the state-disable via server-side damage)
     ImmortalConn = RunService.Stepped:Connect(function()
         if not State.Immortality then return end
         local ch = LocalPlayer.Character
@@ -508,17 +535,13 @@ local function startImmortality()
         if h.Health < h.MaxHealth then
             h.Health = h.MaxHealth
         end
-        -- Some anti-cheats reset these, so re-assert them
-        if h:GetStateEnabled(Enum.HumanoidStateType.Dead) then
-            h:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
-        end
         if h.BreakJointsOnDeath then
             h.BreakJointsOnDeath = false
         end
     end)
 
-    -- If the game forces death anyway, refresh and re-enable
-    ImmortalDied = hum.Died:Connect(function()
+    -- If somehow a Died fires anyway (e.g. server forced), restore health
+    ImmortalDied = nHuman.Died:Connect(function()
         if not State.Immortality then return end
         task.wait(0.1)
         local ch = LocalPlayer.Character
@@ -527,22 +550,19 @@ local function startImmortality()
             if h then
                 h.Health = h.MaxHealth
                 pcall(function()
-                    h:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
+                    h:SetStateEnabled(15, false)
                     h.BreakJointsOnDeath = false
                 end)
             end
         end
     end)
-
-    originalHumanoid = hum
 end
 
 local function setImmortality(enabled)
     if enabled then
         startImmortality()
     else
-        restoreImmortality()
-        State.Immortality = false
+        stopImmortality()
     end
 end
 
@@ -550,11 +570,8 @@ createToggle("Immortality", State.Immortality, setImmortality)
 
 --============================================================
 -- 8) FLING  (BodyAngularVelocity touch-fling, self-safe)
---    Any part that touches you gets launched.
---    Your own parts are kept noclipped + massless so the spin
---    doesn't launch YOU. Restores properties cleanly on toggle-off.
 --============================================================
-local FlingSavedProps = {}   -- part -> saved physical props / massless
+local FlingSavedProps = {}
 
 local function restoreFlingProps()
     for part, saved in pairs(FlingSavedProps) do
@@ -571,7 +588,6 @@ local function stopFling()
     if FlingConn then FlingConn:Disconnect(); FlingConn = nil end
     if FlingDied then FlingDied:Disconnect(); FlingDied = nil end
     if FlingAngular then FlingAngular:Destroy(); FlingAngular = nil end
-
     restoreFlingProps()
 end
 
@@ -905,12 +921,16 @@ end)
 LocalPlayer.CharacterAdded:Connect(function()
     if State.Fly then stopFly() end
     if State.Noclip then stopNoclip() end
-    if State.Immortality then
-        -- Character respawned; restart immortality on the new humanoid
-        task.wait(0.5)
-        if State.Immortality then startImmortality() end
-    end
     if State.Fling then stopFling() end
+
+    -- Re-apply god after respawn if it was on (the humanoid swap only
+    -- lasts for one life; the new character has a fresh normal humanoid)
+    if State.Immortality then
+        task.wait(0.5)
+        if State.Immortality and LocalPlayer.Character then
+            startImmortality()
+        end
+    end
 end)
 
 print("[UnifiedModMenu] Loaded successfully.")
