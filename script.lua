@@ -1,6 +1,6 @@
 --[[
     DELTA EXECUTOR — UNIFIED MOD MENU
-    Features: Click TP, Fly (Collide), Noclip, Spin, Speed, ESP, Immortality, Fling, Position Changer, TP to Player
+    Features: Click TP, Fly (Collide), Noclip, Spin, Speed, Fullbright, ESP, Aimbot, Immortality, Fling, Position Changer, TP to Player
 ]]
 
 --============================================================
@@ -10,6 +10,8 @@ local Players    = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Workspace  = game:GetService("Workspace")
 local CoreGui    = game:GetService("CoreGui")
+local Lighting   = game:GetService("Lighting")
+local UserInputService = game:GetService("UserInputService")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera      = Workspace.CurrentCamera
@@ -36,7 +38,11 @@ local State = {
     SpinSpeed   = 40,
     Speed       = false,
     SpeedRate   = 60,
+    Fullbright  = false,
     ESP         = false,
+    Aimbot      = false,
+    AimbotFOV   = 150,
+    AimbotPart  = "Head",
     Immortality = false,
     Fling       = false,
 }
@@ -46,8 +52,19 @@ local FlyConn, FlyVel, FlyGyro
 local NoclipConn
 local ToolConn
 local SpinConn, SpeedConn
+local FullbrightConn
+local AimbotConn, AimbotInput
 local ImmortalConn, ImmortalDied
 local FlingConn, FlingDied, FlingAngular
+
+-- Save original Lighting values so we can restore them on toggle-off
+local OriginalLighting = {
+    Brightness     = Lighting.Brightness,
+    ClockTime      = Lighting.ClockTime,
+    FogEnd         = Lighting.FogEnd,
+    GlobalShadows  = Lighting.GlobalShadows,
+    OutdoorAmbient = Lighting.OutdoorAmbient,
+}
 
 --============================================================
 -- UI BUILD
@@ -60,7 +77,7 @@ ScreenGui.Parent = CoreGui
 
 local Main = Instance.new("Frame")
 Main.Name = "Main"
-Main.Size = UDim2.new(0, 240, 0, 440)
+Main.Size = UDim2.new(0, 240, 0, 480)
 Main.Position = UDim2.new(0, 25, 0.25, 0)
 Main.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
 Main.BorderSizePixel = 0
@@ -402,7 +419,51 @@ end
 createToggle("Speed", State.Speed, setSpeed)
 
 --============================================================
--- 6) ESP
+-- 6) FULLBRIGHT
+--    Boosts Lighting so the whole map is visible. Uses a Stepped
+--    loop so games that reset Lighting can't turn it off.
+--============================================================
+local function applyFullbright()
+    pcall(function()
+        Lighting.Brightness = 2
+        Lighting.ClockTime = 14
+        Lighting.FogEnd = 100000
+        Lighting.GlobalShadows = false
+        Lighting.OutdoorAmbient = Color3.fromRGB(128, 128, 128)
+    end)
+end
+
+local function stopFullbright()
+    State.Fullbright = false
+    if FullbrightConn then FullbrightConn:Disconnect(); FullbrightConn = nil end
+
+    pcall(function()
+        Lighting.Brightness     = OriginalLighting.Brightness
+        Lighting.ClockTime      = OriginalLighting.ClockTime
+        Lighting.FogEnd         = OriginalLighting.FogEnd
+        Lighting.GlobalShadows  = OriginalLighting.GlobalShadows
+        Lighting.OutdoorAmbient = OriginalLighting.OutdoorAmbient
+    end)
+end
+
+local function startFullbright()
+    State.Fullbright = true
+    applyFullbright()
+
+    FullbrightConn = RunService.Stepped:Connect(function()
+        if not State.Fullbright then return end
+        applyFullbright()
+    end)
+end
+
+local function setFullbright(enabled)
+    if enabled then startFullbright() else stopFullbright() end
+end
+
+createToggle("Fullbright", State.Fullbright, setFullbright)
+
+--============================================================
+-- 7) ESP
 --============================================================
 local function applyESP(character)
     if not character then return end
@@ -451,11 +512,84 @@ end
 createToggle("ESP", State.ESP, setESP)
 
 --============================================================
--- 7) IMMORTALITY  (Infinite Yield ;god style)
---    Swaps your Humanoid for a clone with death states disabled.
---    This is the same trick IY uses for ;god.
+-- 8) AIMBOT  (silent-ish camera lock onto nearest player)
+--    Smoothly rotates the camera toward the closest player's
+--    Head/Torso while the toggle is ON. Requires you to be
+--    holding right mouse button (so normal camera is unlocked).
+--    FOV and target part are configurable below.
 --============================================================
-local immortalGodHumanoid = nil   -- reference to the cloned "god" humanoid
+-- Configurable aimbot settings (change these if you want)
+State.AimbotFOV  = 150
+State.AimbotPart = "Head"   -- "Head" or "HumanoidRootPart"
+
+local function getClosestTarget()
+    local localChar = LocalPlayer.Character
+    if not localChar then return nil end
+    local localRoot = localChar:FindFirstChild("HumanoidRootPart")
+    if not localRoot then return nil end
+
+    local closest, closestDist = nil, State.AimbotFOV
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local tRoot = plr.Character:FindFirstChild("HumanoidRootPart")
+            local tPart = plr.Character:FindFirstChild(State.AimbotPart)
+            local hum   = plr.Character:FindFirstChildOfClass("Humanoid")
+            if tRoot and tPart and hum and hum.Health > 0 then
+                -- Must be on screen
+                local _, onScreen = Camera:WorldToViewportPoint(tPart.Position)
+                if onScreen then
+                    local dist = (tPart.Position - localRoot.Position).Magnitude
+                    -- Screen-space distance for FOV check
+                    local screenPos = Camera:WorldToViewportPoint(tPart.Position)
+                    local screenCenter = Camera.ViewportSize / 2
+                    local screenDist = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
+                    if screenDist <= State.AimbotFOV and dist < closestDist then
+                        closest = tPart
+                        closestDist = dist
+                    end
+                end
+            end
+        end
+    end
+    return closest
+end
+
+local function stopAimbot()
+    State.Aimbot = false
+    if AimbotConn then AimbotConn:Disconnect(); AimbotConn = nil end
+end
+
+local function startAimbot()
+    State.Aimbot = true
+    if AimbotConn then AimbotConn:Disconnect() end
+
+    AimbotConn = RunService.RenderStepped:Connect(function()
+        if not State.Aimbot then return end
+
+        -- Only aim while holding right mouse button (so normal camera still works)
+        if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
+
+        local target = getClosestTarget()
+        if not target then return end
+
+        local targetPos = target.Position
+        local camPos = Camera.CFrame.Position
+        local desiredCF = CFrame.new(camPos, targetPos)
+        -- Smooth interpolation so it doesn't snap
+        Camera.CFrame = Camera.CFrame:Lerp(desiredCF, 0.25)
+    end)
+end
+
+local function setAimbot(enabled)
+    if enabled then startAimbot() else stopAimbot() end
+end
+
+createToggle("Aimbot", State.Aimbot, setAimbot)
+
+--============================================================
+-- 9) IMMORTALITY  (Infinite Yield ;god style)
+--============================================================
+local immortalGodHumanoid = nil
 
 local function stopImmortality()
     State.Immortality = false
@@ -463,9 +597,6 @@ local function stopImmortality()
     if ImmortalConn then ImmortalConn:Disconnect(); ImmortalConn = nil end
     if ImmortalDied then ImmortalDied:Disconnect(); ImmortalDied = nil end
 
-    -- We cannot cleanly undo the humanoid swap. On next respawn the game
-    -- gives a normal humanoid, so this just stops the health-refresh loop
-    -- and re-enables the death states on whatever humanoid is current.
     local char = LocalPlayer.Character
     if char then
         local hum = char:FindFirstChildOfClass("Humanoid")
@@ -490,7 +621,6 @@ local function startImmortality()
 
     State.Immortality = true
 
-    -- IY's god method: clone the humanoid, detach the character, kill original
     local Cam = Workspace.CurrentCamera
     local Pos = Cam.CFrame
 
@@ -498,22 +628,19 @@ local function startImmortality()
     nHuman.Parent = char
     LocalPlayer.Character = nil
 
-    -- Disable death-related states on the clone
-    nHuman:SetStateEnabled(15, false) -- Dead
-    nHuman:SetStateEnabled(1, false)  -- Physics
-    nHuman:SetStateEnabled(0, false)  -- FallingDown
+    nHuman:SetStateEnabled(15, false)
+    nHuman:SetStateEnabled(1, false)
+    nHuman:SetStateEnabled(0, false)
     nHuman.BreakJointsOnDeath = true
 
     human:Destroy()
 
-    -- Restore character reference and point camera at the new humanoid
     LocalPlayer.Character = char
     Cam.CameraSubject = nHuman
     Cam.CFrame = Pos
 
     nHuman.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
 
-    -- Reload animations so the character doesn't look frozen
     local animateScript = char:FindFirstChild("Animate")
     if animateScript then
         animateScript.Disabled = true
@@ -524,8 +651,6 @@ local function startImmortality()
     nHuman.Health = nHuman.MaxHealth
     immortalGodHumanoid = nHuman
 
-    -- Health-refresh loop as a safety net (in case the game bypasses
-    -- the state-disable via server-side damage)
     ImmortalConn = RunService.Stepped:Connect(function()
         if not State.Immortality then return end
         local ch = LocalPlayer.Character
@@ -540,7 +665,6 @@ local function startImmortality()
         end
     end)
 
-    -- If somehow a Died fires anyway (e.g. server forced), restore health
     ImmortalDied = nHuman.Died:Connect(function()
         if not State.Immortality then return end
         task.wait(0.1)
@@ -569,7 +693,7 @@ end
 createToggle("Immortality", State.Immortality, setImmortality)
 
 --============================================================
--- 8) FLING  (BodyAngularVelocity touch-fling, self-safe)
+-- 10) FLING  (BodyAngularVelocity touch-fling, self-safe)
 --============================================================
 local FlingSavedProps = {}
 
@@ -669,7 +793,7 @@ end
 createToggle("Fling", State.Fling, setFling)
 
 --============================================================
--- 9) POSITION CHANGER
+-- 11) POSITION CHANGER
 --============================================================
 local PosRow = Instance.new("Frame")
 PosRow.Size = UDim2.new(1, -8, 0, 132)
@@ -804,7 +928,7 @@ TeleportBtn.MouseButton1Click:Connect(function()
 end)
 
 --============================================================
--- 10) TP TO PLAYER
+-- 12) TP TO PLAYER
 --============================================================
 local TPPlayerRow = Instance.new("Frame")
 TPPlayerRow.Size = UDim2.new(1, -8, 0, 150)
@@ -923,8 +1047,6 @@ LocalPlayer.CharacterAdded:Connect(function()
     if State.Noclip then stopNoclip() end
     if State.Fling then stopFling() end
 
-    -- Re-apply god after respawn if it was on (the humanoid swap only
-    -- lasts for one life; the new character has a fresh normal humanoid)
     if State.Immortality then
         task.wait(0.5)
         if State.Immortality and LocalPlayer.Character then
