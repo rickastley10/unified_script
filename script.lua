@@ -1,6 +1,6 @@
 --[[
     DELTA EXECUTOR — UNIFIED MOD MENU
-    Features: Toggle IY, Play Animation, T-Pose, Click TP, Fly (Collide), Noclip, Spin, Speed, Fullbright, ESP, Aimbot, Killaura, Hitboxes, Immortality, Fling, Position Changer, TP to Player
+    Features: Toggle IY, Play Animation (Loop), T-Pose, Click TP, Fly (Collide), Noclip, Spin, Speed, Fullbright, ESP, Aimbot, Killaura, Hitboxes, Immortality, Fling, Position Changer, TP to Player
 ]]
 
 --============================================================
@@ -51,6 +51,7 @@ local State = {
     Immortality = false,
     Fling       = false,
     TPose       = false,
+    LoopAnim    = false,   -- NEW
 }
 
 -- Runtime refs
@@ -65,7 +66,7 @@ local HitboxConn, HitboxConnections
 local ImmortalConn, ImmortalDied
 local FlingConn, FlingDied, FlingAngular
 local TPoseConn, TPoseSavedAnimate
-local AnimTrack, AnimInstance
+local AnimTrack, AnimInstance, AnimLoopConn   -- NEW: AnimLoopConn
 
 -- Save original Lighting values so we can restore them on toggle-off
 local OriginalLighting = {
@@ -274,26 +275,48 @@ createButton("Toggle IY (Load / Unload)", function()
 end)
 
 --============================================================
--- 0c) PLAY ANIMATION  (rbxassetid://92210541330613)
---    Plays the given animation on your character. Client-side
---    only — other players will NOT see it unless the animation
---    asset is owned by Roblox or the game itself.
+-- 0c) PLAY ANIMATION (LOOP)  (rbxassetid://92210541330613)
+--    Toggle ON  → plays the animation, looped.
+--    Toggle OFF → stops playback and cleans up.
+--    Client-side only; other players won't see it unless the
+--    animation is owned by Roblox or the game's creator.
 --============================================================
 local ANIMATION_ID = "rbxassetid://92210541330613"
 
-createButton("Play Animation", function()
+local function stopLoopAnim()
+    State.LoopAnim = false
+
+    if AnimLoopConn then
+        AnimLoopConn:Disconnect()
+        AnimLoopConn = nil
+    end
+
+    if AnimTrack then
+        pcall(function() AnimTrack:Stop() end)
+        AnimTrack = nil
+    end
+
+    if AnimInstance then
+        AnimInstance:Destroy()
+        AnimInstance = nil
+    end
+end
+
+local function startLoopAnim()
     local char = LocalPlayer.Character
     if not char then
-        warn("[ModMenu] No character.")
+        State.LoopAnim = false
         return
     end
     local hum = char:FindFirstChildOfClass("Humanoid")
     if not hum then
-        warn("[ModMenu] No Humanoid.")
+        State.LoopAnim = false
         return
     end
 
-    -- Stop and clean up any previous playback
+    State.LoopAnim = true
+
+    -- Clean up any previous state
     if AnimTrack then
         pcall(function() AnimTrack:Stop() end)
         AnimTrack = nil
@@ -307,7 +330,7 @@ createButton("Play Animation", function()
     AnimInstance = Instance.new("Animation")
     AnimInstance.AnimationId = ANIMATION_ID
 
-    -- Load and play
+    -- Load
     local ok, track = pcall(function()
         return hum:LoadAnimation(AnimInstance)
     end)
@@ -315,23 +338,64 @@ createButton("Play Animation", function()
         warn("[ModMenu] Failed to load animation: " .. tostring(track))
         AnimInstance:Destroy()
         AnimInstance = nil
+        State.LoopAnim = false
         return
     end
 
+    -- Loop forever until toggled off
     track.Priority = Enum.AnimationPriority.Action4
-    track.Looped = false
+    track.Looped = true
     track:Play(0.1)
 
     AnimTrack = track
 
-    track.Stopped:Connect(function()
-        if AnimInstance then
-            AnimInstance:Destroy()
-            AnimInstance = nil
+    -- If the game or another script stops the track while the
+    -- toggle is still ON, restart it. This keeps it "infinite"
+    -- even if something resets the humanoid's animations.
+    AnimLoopConn = track.Stopped:Connect(function()
+        if not State.LoopAnim then return end
+        task.wait(0.05)
+        if not State.LoopAnim then return end
+
+        local ch = LocalPlayer.Character
+        if not ch then return end
+        local h = ch:FindFirstChildOfClass("Humanoid")
+        if not h then return end
+
+        -- Rebuild and replay
+        if AnimInstance then AnimInstance:Destroy() end
+        AnimInstance = Instance.new("Animation")
+        AnimInstance.AnimationId = ANIMATION_ID
+
+        local ok2, track2 = pcall(function() return h:LoadAnimation(AnimInstance) end)
+        if ok2 and track2 then
+            track2.Priority = Enum.AnimationPriority.Action4
+            track2.Looped = true
+            track2:Play(0.1)
+            AnimTrack = track2
+
+            -- Re-attach this same listener to the new track
+            AnimLoopConn:Disconnect()
+            AnimLoopConn = track2.Stopped:Connect(function()
+                if not State.LoopAnim then return end
+                task.wait(0.05)
+                if State.LoopAnim then
+                    startLoopAnim()
+                end
+            end)
         end
-        AnimTrack = nil
     end)
-end)
+end
+
+local function setLoopAnim(enabled)
+    if enabled then
+        startLoopAnim()
+    else
+        stopLoopAnim()
+    end
+end
+
+createToggle("Play Animation (Loop)", State.LoopAnim, setLoopAnim)
 
 --============================================================
 -- 0b) T-POSE
@@ -1417,6 +1481,7 @@ LocalPlayer.CharacterAdded:Connect(function()
     if State.Fly then stopFly() end
     if State.Noclip then stopNoclip() end
     if State.Fling then stopFling() end
+    if State.LoopAnim then stopLoopAnim() end   -- NEW: stop anim on death
 
     if State.Immortality then
         task.wait(0.5)
