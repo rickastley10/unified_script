@@ -1,6 +1,6 @@
 --[[
     DELTA EXECUTOR — UNIFIED MOD MENU
-    Features: Toggle IY, T-Pose, Click TP, Fly (Collide), Noclip, Spin, Speed, Fullbright, ESP, Aimbot, Killaura, Hitboxes, Immortality, Fling, Position Changer, TP to Player
+    Features: Toggle IY, Play Animation, T-Pose, Click TP, Fly (Collide), Noclip, Spin, Speed, Fullbright, ESP, Aimbot, Killaura, Hitboxes, Immortality, Fling, Position Changer, TP to Player
 ]]
 
 --============================================================
@@ -65,6 +65,7 @@ local HitboxConn, HitboxConnections
 local ImmortalConn, ImmortalDied
 local FlingConn, FlingDied, FlingAngular
 local TPoseConn, TPoseSavedAnimate
+local AnimTrack, AnimInstance
 
 -- Save original Lighting values so we can restore them on toggle-off
 local OriginalLighting = {
@@ -270,6 +271,66 @@ createButton("Toggle IY (Load / Unload)", function()
             warn("[ModMenu] Failed to load IY: " .. tostring(err))
         end
     end
+end)
+
+--============================================================
+-- 0c) PLAY ANIMATION  (rbxassetid://92210541330613)
+--    Plays the given animation on your character. Client-side
+--    only — other players will NOT see it unless the animation
+--    asset is owned by Roblox or the game itself.
+--============================================================
+local ANIMATION_ID = "rbxassetid://92210541330613"
+
+createButton("Play Animation", function()
+    local char = LocalPlayer.Character
+    if not char then
+        warn("[ModMenu] No character.")
+        return
+    end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then
+        warn("[ModMenu] No Humanoid.")
+        return
+    end
+
+    -- Stop and clean up any previous playback
+    if AnimTrack then
+        pcall(function() AnimTrack:Stop() end)
+        AnimTrack = nil
+    end
+    if AnimInstance then
+        AnimInstance:Destroy()
+        AnimInstance = nil
+    end
+
+    -- Build the Animation instance
+    AnimInstance = Instance.new("Animation")
+    AnimInstance.AnimationId = ANIMATION_ID
+
+    -- Load and play
+    local ok, track = pcall(function()
+        return hum:LoadAnimation(AnimInstance)
+    end)
+    if not ok or not track then
+        warn("[ModMenu] Failed to load animation: " .. tostring(track))
+        AnimInstance:Destroy()
+        AnimInstance = nil
+        return
+    end
+
+    track.Priority = Enum.AnimationPriority.Action4
+    track.Looped = false
+    track:Play(0.1)
+
+    AnimTrack = track
+
+    track.Stopped:Connect(function()
+        if AnimInstance then
+            AnimInstance:Destroy()
+            AnimInstance = nil
+        end
+        AnimTrack = nil
+    end)
 end)
 
 --============================================================
@@ -621,14 +682,7 @@ end
 createToggle("ESP", State.ESP, setESP)
 
 --============================================================
--- 8) AIMBOT  (character rotation — FIXED)
---    The Humanoid's AutoRotate normally overwrites the root
---    CFrame every frame, which is why the previous version
---    didn't visibly turn the character. This version:
---      1) disables AutoRotate while aimbot is on
---      2) uses CFrame.lookAt on the root
---      3) also nudges the camera to face the target so the
---         visible turn is obvious.
+-- 8) AIMBOT
 --============================================================
 local function getClosestTarget()
     local localChar = LocalPlayer.Character
@@ -664,7 +718,6 @@ local function stopAimbot()
     State.Aimbot = false
     if AimbotConn then AimbotConn:Disconnect(); AimbotConn = nil end
 
-    -- Restore AutoRotate so the humanoid behaves normally again
     local char = LocalPlayer.Character
     if char then
         local hum = char:FindFirstChildOfClass("Humanoid")
@@ -678,8 +731,6 @@ local function startAimbot()
     State.Aimbot = true
     if AimbotConn then AimbotConn:Disconnect() end
 
-    -- Disable AutoRotate once up front; the loop also re-asserts
-    -- it in case the game re-enables it.
     local char = LocalPlayer.Character
     if char then
         local hum = char:FindFirstChildOfClass("Humanoid")
@@ -697,29 +748,24 @@ local function startAimbot()
         local hum  = ch:FindFirstChildOfClass("Humanoid")
         if not root or not hum then return end
 
-        -- Re-assert AutoRotate off every frame in case something flips it
         if hum.AutoRotate then
             hum.AutoRotate = false
         end
 
-        -- Only aim while holding right mouse button (so normal camera works)
         if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
 
         local target = getClosestTarget()
         if not target then return end
 
-        -- Rotate the character to face the target, keeping it upright
         local charPos = root.Position
         local targetPos = target.Position
         local flatTarget = Vector3.new(targetPos.X, charPos.Y, targetPos.Z)
 
-        -- Guard: if we're already almost on top of the target, skip
         if (flatTarget - charPos).Magnitude < 0.05 then return end
 
         local desiredCF = CFrame.lookAt(charPos, flatTarget)
         root.CFrame = root.CFrame:Lerp(desiredCF, 0.35)
 
-        -- Also aim the camera so it's visible even if you're not moving
         local camCF = Camera.CFrame
         local desiredCam = CFrame.lookAt(camCF.Position, targetPos)
         Camera.CFrame = camCF:Lerp(desiredCam, 0.35)
@@ -823,14 +869,11 @@ end
 createToggle("Killaura", State.Killaura, setKillaura)
 
 --============================================================
--- 10) HITBOXES  (expand every player's HumanoidRootPart)
---    Toggling ON resizes all current characters' RootParts
---    to a big invisible box so you can hit them from afar.
---    New characters get caught by CharacterAdded.
+-- 10) HITBOXES
 --============================================================
 State.HitboxSize = 10
 
-local originalHitboxSizes = {}  -- character -> original root size
+local originalHitboxSizes = {}
 local hitboxConnections = {}
 
 local function applyHitbox(character)
@@ -891,7 +934,6 @@ end
 local function startHitboxes()
     State.Hitboxes = true
 
-    -- Catch all current characters
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer and plr.Character then
             applyHitbox(plr.Character)
@@ -899,7 +941,6 @@ local function startHitboxes()
         attachHitboxListener(plr)
     end
 
-    -- Catch new players
     HitboxConn = Players.PlayerAdded:Connect(function(plr)
         if not State.Hitboxes then return end
         attachHitboxListener(plr)
@@ -917,7 +958,7 @@ end
 createToggle("Hitboxes", State.Hitboxes, setHitboxes)
 
 --============================================================
--- 11) IMMORTALITY  (Infinite Yield ;god style)
+-- 11) IMMORTALITY
 --============================================================
 local immortalGodHumanoid = nil
 
