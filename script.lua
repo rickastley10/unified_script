@@ -1,6 +1,6 @@
 --[[
     DELTA EXECUTOR — UNIFIED MOD MENU
-    Features: Toggle IY, T-Pose, Click TP, Fly (Collide), Noclip, Spin, Speed, Fullbright, ESP, Aimbot, Immortality, Fling, Position Changer, TP to Player
+    Features: Toggle IY, T-Pose, Click TP, Fly (Collide), Noclip, Spin, Speed, Fullbright, ESP, Aimbot, Killaura, Immortality, Fling, Position Changer, TP to Player
 ]]
 
 --============================================================
@@ -12,6 +12,7 @@ local Workspace  = game:GetService("Workspace")
 local CoreGui    = game:GetService("CoreGui")
 local Lighting   = game:GetService("Lighting")
 local UserInputService = game:GetService("UserInputService")
+local VirtualUser = game:GetService("VirtualUser")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera      = Workspace.CurrentCamera
@@ -43,6 +44,8 @@ local State = {
     Aimbot      = false,
     AimbotFOV   = 150,
     AimbotPart  = "Head",
+    Killaura    = false,
+    KillauraRange = 20,
     Immortality = false,
     Fling       = false,
     TPose       = false,
@@ -55,6 +58,7 @@ local ToolConn
 local SpinConn, SpeedConn
 local FullbrightConn
 local AimbotConn, AimbotInput
+local KillauraConn
 local ImmortalConn, ImmortalDied
 local FlingConn, FlingDied, FlingAngular
 local TPoseConn, TPoseSavedAnimate
@@ -242,16 +246,13 @@ local function createButton(text, callback)
 end
 
 --============================================================
--- 0) TOGGLE IY  (load / unload Infinite Yield)
+-- 0) TOGGLE IY
 --============================================================
 local IY_LOADED_KEY = "IY_LOADED"
 
 createButton("Toggle IY (Load / Unload)", function()
     local isLoaded = getgenv() and getgenv()[IY_LOADED_KEY]
     if isLoaded then
-        -- IY is already running; we can't "unload" it cleanly because it
-        -- doesn't expose a stop function, but clearing the flag lets the
-        -- next loadstring call re-run it fresh.
         pcall(function() getgenv()[IY_LOADED_KEY] = nil end)
         print("[ModMenu] IY_LOADED flag cleared — next Toggle IY will reload IY.")
     else
@@ -269,7 +270,7 @@ createButton("Toggle IY (Load / Unload)", function()
 end)
 
 --============================================================
--- 0b) T-POSE  (IY's ;noanim equivalent — disables Animate script)
+-- 0b) T-POSE
 --============================================================
 local function setTPose(enabled)
     State.TPose = enabled
@@ -287,12 +288,9 @@ local function setTPose(enabled)
     end
 
     if enabled then
-        -- Save current disabled state so we can restore on toggle-off
         TPoseSavedAnimate = animate.Disabled
         animate.Disabled = true
 
-        -- Stop any currently-playing animations so the character
-        -- immediately snaps into the default (T) pose.
         local hum = char:FindFirstChildOfClass("Humanoid")
         if hum then
             for _, track in ipairs(hum:GetPlayingAnimationTracks()) do
@@ -300,7 +298,6 @@ local function setTPose(enabled)
             end
         end
 
-        -- Re-apply on every new character so toggling during a respawn works
         if not TPoseConn then
             TPoseConn = LocalPlayer.CharacterAdded:Connect(function(newChar)
                 if not State.TPose then return end
@@ -423,7 +420,7 @@ local function startFly()
 end
 
 --============================================================
--- 3) NOCLIP  (Infinite Yield style)
+-- 3) NOCLIP
 --============================================================
 local function restoreCollisions()
     local char = LocalPlayer.Character
@@ -621,11 +618,10 @@ end
 createToggle("ESP", State.ESP, setESP)
 
 --============================================================
--- 8) AIMBOT
+-- 8) AIMBOT  (rotates the CHARACTER toward the target)
+--    When enabled and holding right mouse button, your character
+--    smoothly turns to face the closest player within FOV.
 --============================================================
-State.AimbotFOV  = 150
-State.AimbotPart = "Head"
-
 local function getClosestTarget()
     local localChar = LocalPlayer.Character
     if not localChar then return nil end
@@ -669,13 +665,20 @@ local function startAimbot()
         if not State.Aimbot then return end
         if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
 
+        local char = LocalPlayer.Character
+        if not char then return end
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if not root then return end
+
         local target = getClosestTarget()
         if not target then return end
 
+        -- Rotate the character's root CFrame to face the target's part,
+        -- preserving the character's current position.
+        local charPos = root.Position
         local targetPos = target.Position
-        local camPos = Camera.CFrame.Position
-        local desiredCF = CFrame.new(camPos, targetPos)
-        Camera.CFrame = Camera.CFrame:Lerp(desiredCF, 0.25)
+        local desiredCF = CFrame.lookAt(charPos, Vector3.new(targetPos.X, charPos.Y, targetPos.Z))
+        root.CFrame = root.CFrame:Lerp(desiredCF, 0.25)
     end)
 end
 
@@ -686,7 +689,108 @@ end
 createToggle("Aimbot", State.Aimbot, setAimbot)
 
 --============================================================
--- 9) IMMORTALITY  (Infinite Yield ;god style)
+-- 9) KILLAURA
+--    Auto-attacks the closest player in range. Works with
+--    equipped tools (fires Tool.Activated and touches the
+--    target part) and with click-based melee if the game
+--    fires ClickDetectors. Also fires a VirtualUser click so
+--    games that use mouse1 for melee get the input.
+--============================================================
+State.KillauraRange = 20
+
+local function getClosestKillTarget()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return nil end
+
+    local closest, closestDist = nil, State.KillauraRange
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local tRoot = plr.Character:FindFirstChild("HumanoidRootPart")
+            local hum   = plr.Character:FindFirstChildOfClass("Humanoid")
+            if tRoot and hum and hum.Health > 0 then
+                local dist = (tRoot.Position - root.Position).Magnitude
+                if dist < closestDist then
+                    closest = plr
+                    closestDist = dist
+                end
+            end
+        end
+    end
+    return closest, closestDist
+end
+
+local function stopKillaura()
+    State.Killaura = false
+    if KillauraConn then KillauraConn:Disconnect(); KillauraConn = nil end
+end
+
+local function startKillaura()
+    State.Killaura = true
+    if KillauraConn then KillauraConn:Disconnect() end
+
+    KillauraConn = RunService.Heartbeat:Connect(function()
+        if not State.Killaura then return end
+
+        local char = LocalPlayer.Character
+        if not char then return end
+
+        local targetPlr, dist = getClosestKillTarget()
+        if not targetPlr then return end
+
+        local targetChar = targetPlr.Character
+        if not targetChar then return end
+
+        -- 1) If holding a tool, fire its activation and touch its handle
+        --    against the target's hitbox. This handles sword / weapon games.
+        local equipped = char:FindFirstChildOfClass("Tool")
+        if equipped then
+            local handle = equipped:FindFirstChild("Handle")
+            pcall(function() equipped:Activate() end)
+            if handle and firetouchinterest then
+                local tRoot = targetChar:FindFirstChild("HumanoidRootPart")
+                local tHead = targetChar:FindFirstChild("Head")
+                if tRoot then
+                    pcall(function()
+                        firetouchinterest(handle, tRoot, 0)
+                        firetouchinterest(handle, tRoot, 1)
+                    end)
+                end
+                if tHead then
+                    pcall(function()
+                        firetouchinterest(handle, tHead, 0)
+                        firetouchinterest(handle, tHead, 1)
+                    end)
+                end
+            end
+        end
+
+        -- 2) Fire any ClickDetectors attached to the target character
+        --    (many melee games use these for hit registration).
+        for _, part in ipairs(targetChar:GetDescendants()) do
+            if part:IsA("ClickDetector") then
+                pcall(function() fireclickdetector(part) end)
+            end
+        end
+
+        -- 3) Send a virtual mouse click so games using mouse1 melee
+        --    register a hit. This is client-side input only.
+        pcall(function()
+            VirtualUser:Button1Down(Vector2.new(0, 0))
+            VirtualUser:Button1Up(Vector2.new(0, 0))
+        end)
+    end)
+end
+
+local function setKillaura(enabled)
+    if enabled then startKillaura() else stopKillaura() end
+end
+
+createToggle("Killaura", State.Killaura, setKillaura)
+
+--============================================================
+-- 10) IMMORTALITY  (Infinite Yield ;god style)
 --============================================================
 local immortalGodHumanoid = nil
 
@@ -792,7 +896,7 @@ end
 createToggle("Immortality", State.Immortality, setImmortality)
 
 --============================================================
--- 10) FLING  (BodyAngularVelocity touch-fling, self-safe)
+-- 11) FLING
 --============================================================
 local FlingSavedProps = {}
 
@@ -892,7 +996,7 @@ end
 createToggle("Fling", State.Fling, setFling)
 
 --============================================================
--- 11) POSITION CHANGER
+-- 12) POSITION CHANGER
 --============================================================
 local PosRow = Instance.new("Frame")
 PosRow.Size = UDim2.new(1, -8, 0, 132)
@@ -1027,7 +1131,7 @@ TeleportBtn.MouseButton1Click:Connect(function()
 end)
 
 --============================================================
--- 12) TP TO PLAYER
+-- 13) TP TO PLAYER
 --============================================================
 local TPPlayerRow = Instance.new("Frame")
 TPPlayerRow.Size = UDim2.new(1, -8, 0, 150)
