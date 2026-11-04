@@ -1,6 +1,6 @@
 --[[
     DELTA EXECUTOR — UNIFIED MOD MENU
-    Features: Click TP, Fly (Collide), Noclip, Spin, Speed, Fullbright, ESP, Aimbot, Immortality, Fling, Position Changer, TP to Player
+    Features: Toggle IY, T-Pose, Click TP, Fly (Collide), Noclip, Spin, Speed, Fullbright, ESP, Aimbot, Immortality, Fling, Position Changer, TP to Player
 ]]
 
 --============================================================
@@ -45,6 +45,7 @@ local State = {
     AimbotPart  = "Head",
     Immortality = false,
     Fling       = false,
+    TPose       = false,
 }
 
 -- Runtime refs
@@ -56,6 +57,7 @@ local FullbrightConn
 local AimbotConn, AimbotInput
 local ImmortalConn, ImmortalDied
 local FlingConn, FlingDied, FlingAngular
+local TPoseConn, TPoseSavedAnimate
 
 -- Save original Lighting values so we can restore them on toggle-off
 local OriginalLighting = {
@@ -158,7 +160,7 @@ MinimizeBtn.MouseButton1Click:Connect(function()
 end)
 
 --============================================================
--- TOGGLE HELPER
+-- UI HELPERS
 --============================================================
 local function createToggle(text, initialState, callback)
     local Row = Instance.new("Frame")
@@ -208,6 +210,115 @@ local function createToggle(text, initialState, callback)
 
     return Row, Toggle
 end
+
+local function createButton(text, callback)
+    local Row = Instance.new("Frame")
+    Row.Size = UDim2.new(1, -8, 0, 36)
+    Row.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+    Row.BorderSizePixel = 0
+    Row.Parent = List
+
+    local RowCorner = Instance.new("UICorner")
+    RowCorner.CornerRadius = UDim.new(0, 6)
+    RowCorner.Parent = Row
+
+    local Btn = Instance.new("TextButton")
+    Btn.Size = UDim2.new(1, -16, 0, 26)
+    Btn.Position = UDim2.new(0, 8, 0.5, -13)
+    Btn.BackgroundColor3 = Color3.fromRGB(60, 60, 75)
+    Btn.Text = text
+    Btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Btn.Font = Enum.Font.SourceSansBold
+    Btn.TextSize = 13
+    Btn.BorderSizePixel = 0
+    Btn.Parent = Row
+
+    local BtnCorner = Instance.new("UICorner")
+    BtnCorner.CornerRadius = UDim.new(0, 6)
+    BtnCorner.Parent = Btn
+
+    Btn.MouseButton1Click:Connect(callback)
+    return Row, Btn
+end
+
+--============================================================
+-- 0) TOGGLE IY  (load / unload Infinite Yield)
+--============================================================
+local IY_LOADED_KEY = "IY_LOADED"
+
+createButton("Toggle IY (Load / Unload)", function()
+    local isLoaded = getgenv() and getgenv()[IY_LOADED_KEY]
+    if isLoaded then
+        -- IY is already running; we can't "unload" it cleanly because it
+        -- doesn't expose a stop function, but clearing the flag lets the
+        -- next loadstring call re-run it fresh.
+        pcall(function() getgenv()[IY_LOADED_KEY] = nil end)
+        print("[ModMenu] IY_LOADED flag cleared — next Toggle IY will reload IY.")
+    else
+        local ok, err = pcall(function()
+            loadstring(game:HttpGet(
+                "https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source"
+            ))()
+        end)
+        if ok then
+            print("[ModMenu] Infinite Yield loaded.")
+        else
+            warn("[ModMenu] Failed to load IY: " .. tostring(err))
+        end
+    end
+end)
+
+--============================================================
+-- 0b) T-POSE  (IY's ;noanim equivalent — disables Animate script)
+--============================================================
+local function setTPose(enabled)
+    State.TPose = enabled
+
+    local char = LocalPlayer.Character
+    if not char then
+        State.TPose = false
+        return
+    end
+
+    local animate = char:FindFirstChild("Animate")
+    if not animate then
+        State.TPose = false
+        return
+    end
+
+    if enabled then
+        -- Save current disabled state so we can restore on toggle-off
+        TPoseSavedAnimate = animate.Disabled
+        animate.Disabled = true
+
+        -- Stop any currently-playing animations so the character
+        -- immediately snaps into the default (T) pose.
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            for _, track in ipairs(hum:GetPlayingAnimationTracks()) do
+                pcall(function() track:Stop() end)
+            end
+        end
+
+        -- Re-apply on every new character so toggling during a respawn works
+        if not TPoseConn then
+            TPoseConn = LocalPlayer.CharacterAdded:Connect(function(newChar)
+                if not State.TPose then return end
+                local newAnimate = newChar:WaitForChild("Animate", 5)
+                if newAnimate then
+                    newAnimate.Disabled = true
+                end
+            end)
+        end
+    else
+        animate.Disabled = (TPoseSavedAnimate == true)
+        TPoseSavedAnimate = nil
+
+        if TPoseConn then TPoseConn:Disconnect(); TPoseConn = nil end
+    end
+end
+
+createToggle("T-Pose (NoAnim)", State.TPose, setTPose)
 
 --============================================================
 -- 1) CLICK TP
@@ -420,8 +531,6 @@ createToggle("Speed", State.Speed, setSpeed)
 
 --============================================================
 -- 6) FULLBRIGHT
---    Boosts Lighting so the whole map is visible. Uses a Stepped
---    loop so games that reset Lighting can't turn it off.
 --============================================================
 local function applyFullbright()
     pcall(function()
@@ -512,15 +621,10 @@ end
 createToggle("ESP", State.ESP, setESP)
 
 --============================================================
--- 8) AIMBOT  (silent-ish camera lock onto nearest player)
---    Smoothly rotates the camera toward the closest player's
---    Head/Torso while the toggle is ON. Requires you to be
---    holding right mouse button (so normal camera is unlocked).
---    FOV and target part are configurable below.
+-- 8) AIMBOT
 --============================================================
--- Configurable aimbot settings (change these if you want)
 State.AimbotFOV  = 150
-State.AimbotPart = "Head"   -- "Head" or "HumanoidRootPart"
+State.AimbotPart = "Head"
 
 local function getClosestTarget()
     local localChar = LocalPlayer.Character
@@ -535,11 +639,9 @@ local function getClosestTarget()
             local tPart = plr.Character:FindFirstChild(State.AimbotPart)
             local hum   = plr.Character:FindFirstChildOfClass("Humanoid")
             if tRoot and tPart and hum and hum.Health > 0 then
-                -- Must be on screen
                 local _, onScreen = Camera:WorldToViewportPoint(tPart.Position)
                 if onScreen then
                     local dist = (tPart.Position - localRoot.Position).Magnitude
-                    -- Screen-space distance for FOV check
                     local screenPos = Camera:WorldToViewportPoint(tPart.Position)
                     local screenCenter = Camera.ViewportSize / 2
                     local screenDist = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
@@ -565,8 +667,6 @@ local function startAimbot()
 
     AimbotConn = RunService.RenderStepped:Connect(function()
         if not State.Aimbot then return end
-
-        -- Only aim while holding right mouse button (so normal camera still works)
         if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
 
         local target = getClosestTarget()
@@ -575,7 +675,6 @@ local function startAimbot()
         local targetPos = target.Position
         local camPos = Camera.CFrame.Position
         local desiredCF = CFrame.new(camPos, targetPos)
-        -- Smooth interpolation so it doesn't snap
         Camera.CFrame = Camera.CFrame:Lerp(desiredCF, 0.25)
     end)
 end
