@@ -1,6 +1,6 @@
 --[[
     DELTA EXECUTOR — UNIFIED MOD MENU
-    Features: Toggle IY, T-Pose, Click TP, Fly (Collide), Noclip, Spin, Speed, Fullbright, ESP, Aimbot, Killaura, Immortality, Fling, Position Changer, TP to Player
+    Features: Toggle IY, T-Pose, Click TP, Fly (Collide), Noclip, Spin, Speed, Fullbright, ESP, Aimbot, Killaura, Hitboxes, Immortality, Fling, Position Changer, TP to Player
 ]]
 
 --============================================================
@@ -46,6 +46,8 @@ local State = {
     AimbotPart  = "Head",
     Killaura    = false,
     KillauraRange = 20,
+    Hitboxes    = false,
+    HitboxSize  = 10,
     Immortality = false,
     Fling       = false,
     TPose       = false,
@@ -59,6 +61,7 @@ local SpinConn, SpeedConn
 local FullbrightConn
 local AimbotConn, AimbotInput
 local KillauraConn
+local HitboxConn, HitboxConnections
 local ImmortalConn, ImmortalDied
 local FlingConn, FlingDied, FlingAngular
 local TPoseConn, TPoseSavedAnimate
@@ -618,9 +621,14 @@ end
 createToggle("ESP", State.ESP, setESP)
 
 --============================================================
--- 8) AIMBOT  (rotates the CHARACTER toward the target)
---    When enabled and holding right mouse button, your character
---    smoothly turns to face the closest player within FOV.
+-- 8) AIMBOT  (character rotation — FIXED)
+--    The Humanoid's AutoRotate normally overwrites the root
+--    CFrame every frame, which is why the previous version
+--    didn't visibly turn the character. This version:
+--      1) disables AutoRotate while aimbot is on
+--      2) uses CFrame.lookAt on the root
+--      3) also nudges the camera to face the target so the
+--         visible turn is obvious.
 --============================================================
 local function getClosestTarget()
     local localChar = LocalPlayer.Character
@@ -655,30 +663,66 @@ end
 local function stopAimbot()
     State.Aimbot = false
     if AimbotConn then AimbotConn:Disconnect(); AimbotConn = nil end
+
+    -- Restore AutoRotate so the humanoid behaves normally again
+    local char = LocalPlayer.Character
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            pcall(function() hum.AutoRotate = true end)
+        end
+    end
 end
 
 local function startAimbot()
     State.Aimbot = true
     if AimbotConn then AimbotConn:Disconnect() end
 
+    -- Disable AutoRotate once up front; the loop also re-asserts
+    -- it in case the game re-enables it.
+    local char = LocalPlayer.Character
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            pcall(function() hum.AutoRotate = false end)
+        end
+    end
+
     AimbotConn = RunService.RenderStepped:Connect(function()
         if not State.Aimbot then return end
-        if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
 
-        local char = LocalPlayer.Character
-        if not char then return end
-        local root = char:FindFirstChild("HumanoidRootPart")
-        if not root then return end
+        local ch = LocalPlayer.Character
+        if not ch then return end
+        local root = ch:FindFirstChild("HumanoidRootPart")
+        local hum  = ch:FindFirstChildOfClass("Humanoid")
+        if not root or not hum then return end
+
+        -- Re-assert AutoRotate off every frame in case something flips it
+        if hum.AutoRotate then
+            hum.AutoRotate = false
+        end
+
+        -- Only aim while holding right mouse button (so normal camera works)
+        if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
 
         local target = getClosestTarget()
         if not target then return end
 
-        -- Rotate the character's root CFrame to face the target's part,
-        -- preserving the character's current position.
+        -- Rotate the character to face the target, keeping it upright
         local charPos = root.Position
         local targetPos = target.Position
-        local desiredCF = CFrame.lookAt(charPos, Vector3.new(targetPos.X, charPos.Y, targetPos.Z))
-        root.CFrame = root.CFrame:Lerp(desiredCF, 0.25)
+        local flatTarget = Vector3.new(targetPos.X, charPos.Y, targetPos.Z)
+
+        -- Guard: if we're already almost on top of the target, skip
+        if (flatTarget - charPos).Magnitude < 0.05 then return end
+
+        local desiredCF = CFrame.lookAt(charPos, flatTarget)
+        root.CFrame = root.CFrame:Lerp(desiredCF, 0.35)
+
+        -- Also aim the camera so it's visible even if you're not moving
+        local camCF = Camera.CFrame
+        local desiredCam = CFrame.lookAt(camCF.Position, targetPos)
+        Camera.CFrame = camCF:Lerp(desiredCam, 0.35)
     end)
 end
 
@@ -690,11 +734,6 @@ createToggle("Aimbot", State.Aimbot, setAimbot)
 
 --============================================================
 -- 9) KILLAURA
---    Auto-attacks the closest player in range. Works with
---    equipped tools (fires Tool.Activated and touches the
---    target part) and with click-based melee if the game
---    fires ClickDetectors. Also fires a VirtualUser click so
---    games that use mouse1 for melee get the input.
 --============================================================
 State.KillauraRange = 20
 
@@ -742,8 +781,6 @@ local function startKillaura()
         local targetChar = targetPlr.Character
         if not targetChar then return end
 
-        -- 1) If holding a tool, fire its activation and touch its handle
-        --    against the target's hitbox. This handles sword / weapon games.
         local equipped = char:FindFirstChildOfClass("Tool")
         if equipped then
             local handle = equipped:FindFirstChild("Handle")
@@ -766,16 +803,12 @@ local function startKillaura()
             end
         end
 
-        -- 2) Fire any ClickDetectors attached to the target character
-        --    (many melee games use these for hit registration).
         for _, part in ipairs(targetChar:GetDescendants()) do
             if part:IsA("ClickDetector") then
                 pcall(function() fireclickdetector(part) end)
             end
         end
 
-        -- 3) Send a virtual mouse click so games using mouse1 melee
-        --    register a hit. This is client-side input only.
         pcall(function()
             VirtualUser:Button1Down(Vector2.new(0, 0))
             VirtualUser:Button1Up(Vector2.new(0, 0))
@@ -790,7 +823,101 @@ end
 createToggle("Killaura", State.Killaura, setKillaura)
 
 --============================================================
--- 10) IMMORTALITY  (Infinite Yield ;god style)
+-- 10) HITBOXES  (expand every player's HumanoidRootPart)
+--    Toggling ON resizes all current characters' RootParts
+--    to a big invisible box so you can hit them from afar.
+--    New characters get caught by CharacterAdded.
+--============================================================
+State.HitboxSize = 10
+
+local originalHitboxSizes = {}  -- character -> original root size
+local hitboxConnections = {}
+
+local function applyHitbox(character)
+    if not character then return end
+    local root = character:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    if not originalHitboxSizes[character] then
+        originalHitboxSizes[character] = root.Size
+    end
+
+    root.Size = Vector3.new(State.HitboxSize, State.HitboxSize, State.HitboxSize)
+    root.Transparency = 0.7
+    root.CanCollide = false
+    root.Massless = true
+end
+
+local function removeHitbox(character)
+    if not character then return end
+    local root = character:FindFirstChild("HumanoidRootPart")
+    if root then
+        local orig = originalHitboxSizes[character]
+        if orig then
+            root.Size = orig
+        end
+        root.Transparency = 1
+        root.CanCollide = false
+        root.Massless = true
+    end
+    originalHitboxSizes[character] = nil
+end
+
+local function attachHitboxListener(plr)
+    if hitboxConnections[plr] then return end
+    hitboxConnections[plr] = plr.CharacterAdded:Connect(function(char)
+        if not State.Hitboxes then return end
+        task.wait(0.2)
+        applyHitbox(char)
+    end)
+end
+
+local function stopHitboxes()
+    State.Hitboxes = false
+
+    for character in pairs(originalHitboxSizes) do
+        removeHitbox(character)
+    end
+    originalHitboxSizes = {}
+
+    for plr, conn in pairs(hitboxConnections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    hitboxConnections = {}
+
+    if HitboxConn then HitboxConn:Disconnect(); HitboxConn = nil end
+end
+
+local function startHitboxes()
+    State.Hitboxes = true
+
+    -- Catch all current characters
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            applyHitbox(plr.Character)
+        end
+        attachHitboxListener(plr)
+    end
+
+    -- Catch new players
+    HitboxConn = Players.PlayerAdded:Connect(function(plr)
+        if not State.Hitboxes then return end
+        attachHitboxListener(plr)
+        if plr.Character then
+            task.wait(0.2)
+            applyHitbox(plr.Character)
+        end
+    end)
+end
+
+local function setHitboxes(enabled)
+    if enabled then startHitboxes() else stopHitboxes() end
+end
+
+createToggle("Hitboxes", State.Hitboxes, setHitboxes)
+
+--============================================================
+-- 11) IMMORTALITY  (Infinite Yield ;god style)
 --============================================================
 local immortalGodHumanoid = nil
 
@@ -896,7 +1023,7 @@ end
 createToggle("Immortality", State.Immortality, setImmortality)
 
 --============================================================
--- 11) FLING
+-- 12) FLING
 --============================================================
 local FlingSavedProps = {}
 
@@ -996,7 +1123,7 @@ end
 createToggle("Fling", State.Fling, setFling)
 
 --============================================================
--- 12) POSITION CHANGER
+-- 13) POSITION CHANGER
 --============================================================
 local PosRow = Instance.new("Frame")
 PosRow.Size = UDim2.new(1, -8, 0, 132)
@@ -1131,7 +1258,7 @@ TeleportBtn.MouseButton1Click:Connect(function()
 end)
 
 --============================================================
--- 13) TP TO PLAYER
+-- 14) TP TO PLAYER
 --============================================================
 local TPPlayerRow = Instance.new("Frame")
 TPPlayerRow.Size = UDim2.new(1, -8, 0, 150)
